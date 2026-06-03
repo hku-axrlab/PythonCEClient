@@ -9,11 +9,6 @@ Defaults:
     port        = 4196
     rate        = 1000          (desired incoming data delay in ms)
     client-type = "python"
-
-Quick start:
-    pip install -r requirements.txt
-    python calib_client.py
-    python calib_client.py --host 192.168.1.10 --port 8765 --rate 60 --client-type "viewer"
 """
 
 import asyncio
@@ -66,18 +61,16 @@ class User:
     id:        str = ""
     home:      str = ""
     name:      str = ""
-    # transform: Transform = field(default_factory=Transform)
     boneTransforms: list = field(default_factory=list)
     boneNames: list = field(default_factory=list)
-
-    # Extend with extra fields as needed (e.g. device_type, color, …)
+    
     def to_dict(self) -> dict:
         d = asdict(self)
         return d
 
 @dataclass
 class CalibObject:
-    """A tracked physical or virtual object in the calibration scene."""
+    """A tracked physical or virtual object in the calibration scene (untested)"""
     """A unique object called a 'vRoot' (tag) is expected from every client, if none exists absolute positions are used"""
     """To parse the incoming transforms properly, you will need to make the transforms of objects local to the vRoot sent along (or not sent, in which case absolute is local)"""
     """You can match objects and the correct vRoot via the home GUID"""
@@ -96,7 +89,7 @@ class CalibObject:
 
 @dataclass
 class WorldModel:
-    """Snapshot of the full world state."""
+    """Snapshot of the full world state (untested)"""
     users:   list = field(default_factory=list)   # list[User]
     objects: list = field(default_factory=list)   # list[CalibObject]
 
@@ -124,37 +117,6 @@ def build_connect_message(client_type: str, send_rate: int) -> dict:
         "clientType":   client_type,
         "sendRate":     send_rate,
     }
-
-
-# ---------------------------------------------------------------------------
-# Receive handler
-# Override / extend this to react to incoming world-model updates.
-# ---------------------------------------------------------------------------
-def handle_world_update(data: dict) -> None:
-    """
-    Called whenever the server pushes a world-model update.
-
-    `data` is the already-parsed JSON dict from the server.
-    Replace the body of this function with your own logic.
-    """
-    users   = data.get("data", {}).get("users",   [])
-    objects = data.get("data", {}).get("objects", [])
-    log.info("World update – %d user(s), %d object(s)", len(users), len(objects))
-
-    for u in users:
-        log.debug("  user   %s  pos=(%.3f, %.3f, %.3f)",
-                  u.get("user_id"), 
-                  u.get("boneTransforms", {})[0].get("pos_x", 0),
-                  u.get("boneTransforms", {})[0].get("pos_y", 0),
-                  u.get("boneTransforms", {})[0].get("pos_z", 0))
-
-    for o in objects:
-        log.debug("  object %s (%s)  pos=(%.3f, %.3f, %.3f)",
-                  o.get("id"), o.get("tag"),
-                  o.get("transform", {}).get("pos_x", 0),
-                  o.get("transform", {}).get("pos_y", 0),
-                  o.get("transform", {}).get("pos_z", 0))
-
 
 def handle_message(data: dict) -> None:
     """
@@ -210,10 +172,6 @@ async def run(host: str, port: int, client_type: str, send_rate: int) -> None:
         log.info("Sent clientConnect (type=%s, rate=%d)", client_type, send_rate)
 
         # 2. Receive loop
-        #
-        # To also send periodic updates, replace the simple receive loop with
-        # an asyncio.gather() of a sender task and this receiver task.
-        # See the commented-out example below.
         async for raw in ws:
             try:
                 data = json.loads(raw)
