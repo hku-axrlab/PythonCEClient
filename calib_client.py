@@ -12,6 +12,8 @@ Defaults:
 """
 
 import numpy as np
+from pythonosc import udp_client
+from pythonosc.udp_client import SimpleUDPClient
 from scipy.spatial.transform import Rotation as R
 
 import asyncio
@@ -35,15 +37,52 @@ log = logging.getLogger("calib_client")
 
 remoteRoots = {}
 
-# This gets called when a mesage was parsed
+# This gets called when a message was parsed
 # Use this to check the worldModel and find objects / users etc.
-def onMessageParsed() -> None:
+def onMessageParsed(osc_client : SimpleUDPClient) -> None:
     # Example of how to go through the objects
     for id in worldModel.objects:
         obj = worldModel.objects[id]
-        
+
         if obj.tag == "Femto":
-            # log.info('%s, %s, %s', obj.transform.pos_x, obj.transform.pos_y, obj.transform.pos_z)
+            log.info('Femto: %s, %s, %s', obj.transform.pos_x, obj.transform.pos_y, obj.transform.pos_z)
+        elif obj.tag == "Spot":
+            # spotlight id is last digit at end of name - NOTE: assumes no id higher than 9!
+            id = int(obj.name[-1])
+
+            # covert id to match physical spots (1, 20, 40, 60, 80, 100)
+            # so minus 1, times 20, and plus 1 again if spot_id is 0
+            spot_id = (id - 1) * 20
+            if spot_id == 0:
+                spot_id += 1
+
+            # grab values to pass through OSC
+            intensity = obj.get_data("intensity")
+            color = obj.get_data("color")
+
+            log.info('Spot [%s]: intensity = %s (%s), color = %s (%s)', id, intensity.value, type(intensity.value), color.value, type(color.value))
+
+            # send OSC msg per expected channel
+            # each channel expects values between 0-100
+
+            # CHANNELS
+            # 0. Dimmer (intensity)
+            # 1. Strobe (100)
+            # 2. UNKNOWN (100)
+            # 3-5. R, G, B
+            # 6-13. IGNORE (0)
+            # 14. Refresh (168)
+
+            osc_client.send_message(f"/{spot_id}", int(intensity.value * 100))
+            osc_client.send_message(f"/{spot_id + 1}", int(100))
+            osc_client.send_message(f"/{spot_id + 2}", int(100))
+            osc_client.send_message(f"/{spot_id + 3}", int(color.value['r'] * 100))
+            osc_client.send_message(f"/{spot_id + 4}", int(color.value['g'] * 100))
+            osc_client.send_message(f"/{spot_id + 5}", int(color.value['b'] * 100))
+            for i in range(6, 14):
+                osc_client.send_message(f"/{spot_id + i}", 0)
+            osc_client.send_message(f"/{spot_id + 14}", int(168))
+
             pass
             
     # Example of how to go through the users        
@@ -81,24 +120,24 @@ class Transform:
     def makeRelative(self, transform : 'Transform') -> 'Transform':
         myPos = np.array([self.pos_x, self.pos_y, self.pos_z])
         myRot = R.from_quat([self.rot_x, self.rot_y, self.rot_z, self.rot_w])
-        
+
         otherPos = np.array([transform.pos_x, transform.pos_y, transform.pos_z])
         otherRot = R.from_quat([transform.rot_x, transform.rot_y, transform.rot_z, transform.rot_w])
-        
+
         otherPos = myRot.apply(otherPos - myPos )
         otherRot = myRot.__mul__(otherRot).as_quat()
-        
+
         transform.pos_x = otherPos[0]
         transform.pos_y = otherPos[1]
         transform.pos_z = otherPos[2]
-        
+
         transform.rot_x = otherRot[0]
         transform.rot_y = otherRot[1]
         transform.rot_z = otherRot[2]
         transform.rot_w = otherRot[3]
-        
+
         return transform
-    
+
 @dataclass
 class ObjectVariable:
     type:       str = ""
@@ -141,6 +180,11 @@ class CalibObject:
         d = asdict(self)
         return d
 
+    def get_data(self, name : str) -> ObjectVariable:
+        for i in self.data:
+            if i.name == name:
+                return i
+        return ObjectVariable()
 
 @dataclass
 class WorldModel:
@@ -155,7 +199,6 @@ class WorldModel:
         }
 
 worldModel : WorldModel = WorldModel()
-
 
 # ---------------------------------------------------------------------------
 # Message builder
@@ -198,13 +241,13 @@ def parseData(d: dict) -> ObjectVariable:
     var.value = d.get("value")    
     return var
 
-def handle_message(data: dict) -> None:
+def handle_message(data: dict, osc_client: SimpleUDPClient) -> None:
     """
     Top-level dispatcher.  Extend the if/elif chain for new message types.
     """
     objects = data.get("objects", "")
     users = data.get("users", "")
-    
+
     # TODO: build vRoot transform dict
     for obj in objects:
         if obj.get("tag") == "vRoot":
@@ -212,9 +255,13 @@ def handle_message(data: dict) -> None:
             remoteRoots[obj.get("home")] = parseTransform(obj.get("transform"))
             # log.info("transform: %s", remoteRoots[obj.get("home")])
             pass
-    
+
     # parse objects & users however you like
     for obj in objects:
+        # NOTE: 'Developer' tag ignored
+        if obj.get("tag") == "Developer":
+            continue
+
         # Get or create the instance to create/update
         calibObject : CalibObject = CalibObject() # field(default_factory=CalibObject)
         
@@ -256,7 +303,6 @@ def handle_message(data: dict) -> None:
         calibUser.home = usr.get("home")
         calibUser.tag = usr.get("tag")
         
-        
         calibUser.boneNames = []
         calibUser.boneTransforms = []
         for tIn in usr.get("boneTransforms"):
@@ -283,7 +329,7 @@ def handle_message(data: dict) -> None:
     #                log.info("%s: %s", obj.get("name"), var.get("value"))
     #                pass
     
-    onMessageParsed()
+    onMessageParsed(osc_client)
 
 # ---------------------------------------------------------------------------
 # Send helpers  (call these from inside the `run` loop or your own coroutines)
@@ -296,9 +342,11 @@ async def send_json(ws, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 # Main client loop
 # ---------------------------------------------------------------------------
-async def run(host: str, port: int, client_type: str, send_rate: int) -> None:
+async def run(host: str, port: int, client_type: str, send_rate: int, osc_ip: str, osc_port: int) -> None:
     uri = f"ws://{host}:{port}"
     log.info("Connecting to %s …", uri)
+
+    osc_client = udp_client.SimpleUDPClient(osc_ip, osc_port)
 
     async with websockets.connect(uri) as ws:
         log.info("Connected.")
@@ -314,7 +362,7 @@ async def run(host: str, port: int, client_type: str, send_rate: int) -> None:
             except json.JSONDecodeError:
                 log.warning("Received non-JSON message: %r", raw)
                 continue
-            handle_message(data)
+            handle_message(data, osc_client)
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -325,11 +373,14 @@ def main() -> None:
     parser.add_argument("--port",        default=4196, type=int, help="Server port")
     parser.add_argument("--rate",        default=1000,   type=int, help="Desired incoming update rate (Hz)")
     parser.add_argument("--client-type", default="python",       help="Client type label sent to server")
-    
+
+    parser.add_argument("--OSC-client", default="192.168.50.116", help="OSC server address")
+    parser.add_argument("--OSC-port", default=6200, help="OSC server port")
+
     args = parser.parse_args()
 
     try:
-        asyncio.run(run(args.host, args.port, args.client_type, args.rate))
+        asyncio.run(run(args.host, args.port, args.client_type, args.rate, args.OSC_client, args.OSC_port))
     except KeyboardInterrupt:
         log.info("Disconnected.")
 
